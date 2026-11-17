@@ -1,7 +1,12 @@
 """UCI dataset benchmark runner. Produces holdout metrics, predictions and a reusable model."""
 from __future__ import annotations
 import argparse, json
+import csv
+import hashlib
+import io
 from pathlib import Path
+import urllib.request
+import zipfile
 import joblib
 import numpy as np
 import pandas as pd
@@ -9,10 +14,11 @@ from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report, f1_score, mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score, average_precision_score, balanced_accuracy_score, classification_report, confusion_matrix, f1_score, fbeta_score, mean_absolute_error, mean_squared_error, precision_score, recall_score, r2_score, roc_auc_score, precision_recall_curve
+from sklearn.model_selection import StratifiedKFold, cross_val_predict, train_test_split
+from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 from ucimlrepo import fetch_ucirepo
 
@@ -20,7 +26,30 @@ DATASET_ID = 228
 PROJECT_TITLE = "SMS Spam Triage Filter"
 CLASSIFICATION_IDS = {602, 228, 159, 357, 186}
 
-def load_data():
+def load_data(data_dir: Path | None = None):
+    if DATASET_ID == 228:
+        # UCI lists this dataset in its catalog but the ucimlrepo API currently
+        # does not expose its file for import. Download the official CC BY 4.0
+        # archive and read the single-tab-delimited corpus file directly.
+        cache_dir = data_dir or Path("data")
+        corpus = cache_dir / "SMSSpamCollection"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        if not corpus.exists():
+            url = "https://archive.ics.uci.edu/static/public/228/sms+spam+collection.zip"
+            with urllib.request.urlopen(url, timeout=60) as response:
+                archive_bytes = response.read()
+            with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+                with archive.open("SMSSpamCollection") as source:
+                    corpus.write_bytes(source.read())
+        rows = []
+        with corpus.open(encoding="utf-8", newline="") as handle:
+            for fields in csv.reader(handle, delimiter="\t", quoting=csv.QUOTE_NONE):
+                if len(fields) >= 2 and fields[0] in {"ham", "spam"}:
+                    rows.append((fields[0], "\t".join(fields[1:])))
+        frame = pd.DataFrame(rows, columns=["label", "message"])
+        X = frame[["message"]]
+        y = frame[["label"]]
+        return X.reset_index(drop=True), y.reset_index(drop=True), "random 75/25 stratified holdout; seed=42"
     dataset = fetch_ucirepo(id=DATASET_ID)
     X, y = dataset.data.features.copy(), dataset.data.targets.copy()
     split_mode = "random"
@@ -37,8 +66,12 @@ def load_data():
 def main():
     parser = argparse.ArgumentParser(description=PROJECT_TITLE)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts"))
+    parser.add_argument("--data-dir", type=Path, default=Path("data"))
     args = parser.parse_args()
-    X, y, split_mode = load_data()
+    X, y, split_mode = load_data(args.data_dir)
+    if DATASET_ID == 228:
+        run_sms_benchmark(X, y, args.output_dir, args.data_dir)
+        return
     classification = DATASET_ID in CLASSIFICATION_IDS
     if DATASET_ID == 357:
         cut = int(len(X) * 0.7)
@@ -72,7 +105,7 @@ def main():
     pred = model.predict(X_test)
     baseline.fit(X_train, y_train_fit)
     base_pred = baseline.predict(X_test)
-    metrics = {"project": PROJECT_TITLE, "dataset_id": DATASET_ID, "rows": len(X), "features": list(X.columns), "targets": list(y.columns), "split": "chronological 70/30 forward holdout" if split_mode == "chronological" else "random 75/25 holdout; seed=42", "task": "classification" if classification else "regression"}
+    metrics = {"project": PROJECT_TITLE, "dataset_id": DATASET_ID, "rows": len(X), "features": list(X.columns), "targets": list(y.columns), "split": "chronological 70/30 forward holdout" if split_mode == "chronological" else split_mode if "holdout" in split_mode else "random 75/25 holdout; seed=42", "task": "classification" if classification else "regression"}
     if classification:
         metrics["holdout"] = {"accuracy": float(accuracy_score(y_test_eval, pred)), "balanced_accuracy": float(balanced_accuracy_score(y_test_eval, pred)), "macro_f1": float(f1_score(y_test_eval, pred, average="macro")), "weighted_f1": float(f1_score(y_test_eval, pred, average="weighted")), "majority_baseline_accuracy": float(accuracy_score(y_test_eval, base_pred)), "per_class": classification_report(y_test_eval, pred, output_dict=True, zero_division=0)}
         if len(np.unique(y_test_eval)) == 2:
@@ -98,5 +131,66 @@ def main():
     joblib.dump(model, args.output_dir / "model.joblib")
     print(json.dumps(metrics, indent=2))
 
+def run_sms_benchmark(X: pd.DataFrame, y: pd.DataFrame, output_dir: Path, data_dir: Path) -> None:
+    """Text-focused model selection with train-only threshold choice and a final holdout."""
+    X_train, X_test, y_train, y_test = train_test_split(
+        X["message"].astype(str), y["label"].astype(str),
+        test_size=0.25, random_state=42, stratify=y["label"].astype(str),
+    )
+    model = Pipeline([
+        ("features", FeatureUnion([
+            ("word", TfidfVectorizer(ngram_range=(1, 2), min_df=2, max_features=100_000, sublinear_tf=True)),
+            ("character", TfidfVectorizer(analyzer="char", ngram_range=(3, 5), min_df=2, max_features=100_000, sublinear_tf=True)),
+        ])),
+        ("classifier", LogisticRegression(class_weight="balanced", max_iter=2000, solver="liblinear", random_state=42)),
+    ])
+    folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    oof = cross_val_predict(model, X_train, y_train, cv=folds, method="predict_proba", n_jobs=1)
+    oof_spam = oof[:, list(sorted(y_train.unique())).index("spam")]
+    precision, recall, thresholds = precision_recall_curve((y_train == "spam").astype(int), oof_spam)
+    f2 = (5 * precision[:-1] * recall[:-1]) / (4 * precision[:-1] + recall[:-1] + 1e-12)
+    threshold_index = int(np.argmax(f2))
+    threshold = float(thresholds[threshold_index])
+    model.fit(X_train, y_train)
+    spam_index = list(model.named_steps["classifier"].classes_).index("spam")
+    scores = model.predict_proba(X_test)[:, spam_index]
+    predictions = np.where(scores >= threshold, "spam", "ham")
+    default_predictions = np.where(scores >= 0.5, "spam", "ham")
+    y_binary = (y_test == "spam").astype(int)
+    dataset_path = data_dir / "SMSSpamCollection"
+    metrics = {
+        "project": PROJECT_TITLE,
+        "dataset_id": DATASET_ID,
+        "dataset": "UCI SMS Spam Collection",
+        "rows": int(len(X)),
+        "features": ["message text (word and character TF-IDF)"],
+        "targets": ["label"],
+        "split": "stratified 75/25 train/holdout; seed=42; threshold tuned on 5-fold out-of-fold training predictions",
+        "model": "word+character TF-IDF with class-weighted logistic regression",
+        "threshold_objective": "maximize F2 for the spam class on training-only out-of-fold predictions",
+        "spam_threshold": threshold,
+        "holdout": {
+            "accuracy": float(accuracy_score(y_test, predictions)),
+            "balanced_accuracy": float(balanced_accuracy_score(y_test, predictions)),
+            "spam_precision": float(precision_score(y_test, predictions, pos_label="spam", zero_division=0)),
+            "spam_recall": float(recall_score(y_test, predictions, pos_label="spam", zero_division=0)),
+            "spam_f2": float(fbeta_score(y_test, predictions, beta=2, pos_label="spam", zero_division=0)),
+            "average_precision": float(average_precision_score(y_binary, scores)),
+            "roc_auc": float(roc_auc_score(y_binary, scores)),
+            "confusion_matrix_labels_ham_spam": confusion_matrix(y_test, predictions, labels=["ham", "spam"]).tolist(),
+            "default_0_5_spam_recall": float(recall_score(y_test, default_predictions, pos_label="spam", zero_division=0)),
+            "default_0_5_spam_precision": float(precision_score(y_test, default_predictions, pos_label="spam", zero_division=0)),
+            "majority_baseline_accuracy": float(accuracy_score(y_test, np.full(len(y_test), "ham"))),
+        },
+        "source_sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
+        "limitations": "Random holdout from a non-chronological corpus; threshold is selected for a research demo, not a deployed spam filter. Messages may contain personal information; the report stores labels and scores only, not message text.",
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"actual_label": y_test.to_numpy(), "spam_score": scores, "predicted_label": predictions}).to_csv(output_dir / "holdout_predictions.csv", index=False)
+    (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    joblib.dump(model, output_dir / "model.joblib")
+    print(json.dumps(metrics, indent=2))
+
 if __name__ == "__main__":
     main()
+
