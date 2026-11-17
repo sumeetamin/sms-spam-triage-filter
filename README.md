@@ -13,11 +13,11 @@ python -m pip install -r requirements.txt
 python main.py --output-dir artifacts
 ```
 
-The runner saves `artifacts/metrics.json`, `artifacts/holdout_predictions.csv`, and `artifacts/model.joblib`. For SMS, the UCI CC BY 4.0 archive is downloaded to the ignored `data/` cache because the repository's importer does not currently expose that dataset. The raw messages are never written to the report.
+The runner saves metrics, holdout predictions, and a reusable model in the ignored output directory. The public [`reports/benchmark.json`](reports/benchmark.json) contains aggregate results only; no row-level records are published.
 
 ## Holdout results
 
-Word and character TF-IDF features feed a class-weighted logistic-regression model. Five-fold out-of-fold scores on the training partition select a threshold that maximizes spam-class F2; the final holdout is untouched during selection. stratified 75/25 train/holdout; seed=42; threshold tuned on 5-fold out-of-fold training predictions.
+Word and character TF-IDF features feed a class-weighted logistic-regression model. Five-fold out-of-fold scores on the training partition select a threshold that maximizes spam-class F2; the final holdout is untouched during selection.
 
 | Accuracy | Balanced accuracy | Macro F1 | Weighted F1 | Majority baseline accuracy |
 |---:|---:|---:|---:|---:|
