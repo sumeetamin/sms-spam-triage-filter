@@ -3,43 +3,26 @@
   "dataset_id": 228,
   "dataset": "UCI SMS Spam Collection",
   "rows": 5574,
-  "features": [
-    "message text (word and character TF-IDF)"
-  ],
-  "targets": [
-    "label"
-  ],
-  "split": "stratified 75/25 train/holdout; seed=42; threshold tuned on 5-fold out-of-fold training predictions",
+  "features": ["message text (word and character TF-IDF)"],
+  "targets": ["label"],
+  "split": "approximately 75/25 stratified group holdout by exact message text; seed=42; threshold tuned on 5-fold group out-of-fold training predictions",
+  "exact_message_groups_overlap": 0,
   "model": "word+character TF-IDF with class-weighted logistic regression",
-  "threshold_objective": "maximize F2 for the spam class on training-only out-of-fold predictions",
-  "spam_threshold": 0.3531640027076349,
+  "threshold_objective": "maximize F2 for spam on training-only group out-of-fold predictions",
+  "spam_threshold": 0.364108391125704,
   "holdout": {
-    "accuracy": 0.9849354375896701,
-    "balanced_accuracy": 0.9800030127287791,
-    "spam_precision": 0.9191919191919192,
-    "spam_recall": 0.9732620320855615,
-    "spam_f2": 0.9619450317124736,
-    "average_precision": 0.9877434687883574,
-    "roc_auc": 0.9953612837768985,
-    "confusion_matrix_labels_ham_spam": [
-      [
-        1191,
-        16
-      ],
-      [
-        5,
-        182
-      ]
-    ],
+    "accuracy": 0.990674318507891,
+    "balanced_accuracy": 0.9855765609700986,
+    "spam_precision": 0.953125,
+    "spam_recall": 0.9786096256684492,
+    "spam_f2": 0.973404255319149,
+    "average_precision": 0.9896503316483966,
+    "roc_auc": 0.994182775166254,
+    "confusion_matrix_labels_ham_spam": [[1198, 9], [4, 183]],
     "default_0_5_spam_recall": 0.9518716577540107,
-    "default_0_5_spam_precision": 0.9834254143646409,
+    "default_0_5_spam_precision": 0.9888888888888889,
     "majority_baseline_accuracy": 0.8658536585365854
   },
   "source_sha256": "7d039a24a6083ed9ef0f806ebad56bbb976e3aeb8de05669173bfdc4996c239d",
-  "limitations": "Random holdout from a non-chronological corpus; threshold is selected for a research demo, not a deployed spam filter. Messages may contain personal information; the report stores labels and scores only, not message text.",
-  "source_url": "https://archive.ics.uci.edu/dataset/228",
-  "generated_at": "2026-11-17",
-  "artifacts_published": [
-    "reports/benchmark.json"
-  ]
+  "limitations": "Random group holdout by exact message text from a non-chronological historical corpus. Threshold is a research choice, not a deployed policy. Public SMS can contain personal information; only aggregate metrics and message-free row-level scores are published."
 }
