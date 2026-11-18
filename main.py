@@ -20,7 +20,6 @@ from sklearn.metrics import accuracy_score, average_precision_score, balanced_ac
 from sklearn.model_selection import StratifiedGroupKFold, cross_val_predict, train_test_split
 from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
-from ucimlrepo import fetch_ucirepo
 
 DATASET_ID = 228
 PROJECT_TITLE = "SMS Spam Triage Filter"
@@ -50,6 +49,7 @@ def load_data(data_dir: Path | None = None):
         X = frame[["message"]]
         y = frame[["label"]]
         return X.reset_index(drop=True), y.reset_index(drop=True), "random 75/25 stratified holdout; seed=42"
+    from ucimlrepo import fetch_ucirepo
     dataset = fetch_ucirepo(id=DATASET_ID)
     X, y = dataset.data.features.copy(), dataset.data.targets.copy()
     split_mode = "random"
@@ -131,12 +131,21 @@ def main():
     joblib.dump(model, args.output_dir / "model.joblib")
     print(json.dumps(metrics, indent=2))
 
+def grouped_holdout_indices(messages, labels, n_splits=4, random_state=42):
+    """Create a deterministic stratified holdout with exact-message groups intact."""
+    messages = pd.Series(messages).astype(str).reset_index(drop=True)
+    labels = pd.Series(labels).astype(str).reset_index(drop=True)
+    if len(messages) != len(labels):
+        raise ValueError("messages and labels must have equal lengths")
+    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    return next(splitter.split(messages, labels, groups=messages))
+
+
 def run_sms_benchmark(X: pd.DataFrame, y: pd.DataFrame, output_dir: Path, data_dir: Path) -> None:
     """Text-focused model selection with train-only threshold choice and a final holdout."""
     messages = X["message"].astype(str).reset_index(drop=True)
     labels = y["label"].astype(str).reset_index(drop=True)
-    holdout_split = StratifiedGroupKFold(n_splits=4, shuffle=True, random_state=42)
-    train_idx, test_idx = next(holdout_split.split(messages, labels, groups=messages))
+    train_idx, test_idx = grouped_holdout_indices(messages, labels)
     X_train, X_test = messages.iloc[train_idx], messages.iloc[test_idx]
     y_train, y_test = labels.iloc[train_idx], labels.iloc[test_idx]
     model = Pipeline([
