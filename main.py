@@ -17,7 +17,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, average_precision_score, balanced_accuracy_score, classification_report, confusion_matrix, f1_score, fbeta_score, mean_absolute_error, mean_squared_error, precision_score, recall_score, r2_score, roc_auc_score, precision_recall_curve
-from sklearn.model_selection import StratifiedKFold, cross_val_predict, train_test_split
+from sklearn.model_selection import StratifiedGroupKFold, cross_val_predict, train_test_split
 from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 from ucimlrepo import fetch_ucirepo
@@ -133,10 +133,12 @@ def main():
 
 def run_sms_benchmark(X: pd.DataFrame, y: pd.DataFrame, output_dir: Path, data_dir: Path) -> None:
     """Text-focused model selection with train-only threshold choice and a final holdout."""
-    X_train, X_test, y_train, y_test = train_test_split(
-        X["message"].astype(str), y["label"].astype(str),
-        test_size=0.25, random_state=42, stratify=y["label"].astype(str),
-    )
+    messages = X["message"].astype(str).reset_index(drop=True)
+    labels = y["label"].astype(str).reset_index(drop=True)
+    holdout_split = StratifiedGroupKFold(n_splits=4, shuffle=True, random_state=42)
+    train_idx, test_idx = next(holdout_split.split(messages, labels, groups=messages))
+    X_train, X_test = messages.iloc[train_idx], messages.iloc[test_idx]
+    y_train, y_test = labels.iloc[train_idx], labels.iloc[test_idx]
     model = Pipeline([
         ("features", FeatureUnion([
             ("word", TfidfVectorizer(ngram_range=(1, 2), min_df=2, max_features=100_000, sublinear_tf=True)),
@@ -144,8 +146,9 @@ def run_sms_benchmark(X: pd.DataFrame, y: pd.DataFrame, output_dir: Path, data_d
         ])),
         ("classifier", LogisticRegression(class_weight="balanced", max_iter=2000, solver="liblinear", random_state=42)),
     ])
-    folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    oof = cross_val_predict(model, X_train, y_train, cv=folds, method="predict_proba", n_jobs=1)
+    folds = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=43)
+    fold_indices = list(folds.split(X_train, y_train, groups=X_train))
+    oof = cross_val_predict(model, X_train, y_train, cv=fold_indices, method="predict_proba", n_jobs=1)
     oof_spam = oof[:, list(sorted(y_train.unique())).index("spam")]
     precision, recall, thresholds = precision_recall_curve((y_train == "spam").astype(int), oof_spam)
     f2 = (5 * precision[:-1] * recall[:-1]) / (4 * precision[:-1] + recall[:-1] + 1e-12)
@@ -165,7 +168,8 @@ def run_sms_benchmark(X: pd.DataFrame, y: pd.DataFrame, output_dir: Path, data_d
         "rows": int(len(X)),
         "features": ["message text (word and character TF-IDF)"],
         "targets": ["label"],
-        "split": "stratified 75/25 train/holdout; seed=42; threshold tuned on 5-fold out-of-fold training predictions",
+        "split": "approximately 75/25 stratified group holdout by exact message text; seed=42; threshold tuned on 5-fold group out-of-fold training predictions",
+        "exact_message_groups_overlap": int(len(set(X_train) & set(X_test))),
         "model": "word+character TF-IDF with class-weighted logistic regression",
         "threshold_objective": "maximize F2 for the spam class on training-only out-of-fold predictions",
         "spam_threshold": threshold,
